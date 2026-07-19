@@ -1,0 +1,6 @@
+{
+  "name": "Supabase Role & Admin Console",
+  "description": "A cinematic, bilingual personal website and app store for Digital Vision Center to browse, buy, and manage custom application projects, complete with custom user profiles, admin dashboards, and automated support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
