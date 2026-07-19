@@ -285,16 +285,6 @@ export default function AuthScreen({
               )}
             </button>
           </form>
-
-          {/* Quick Admin bypass footer */}
-          <div className="mt-6 pt-5 border-t border-slate-850 text-center">
-            <button
-              onClick={triggerAdminBypass}
-              className="text-[10px] font-mono font-bold text-slate-500 hover:text-indigo-400 transition-all cursor-pointer uppercase tracking-wider"
-            >
-              ⚡ {t.adminBypass} (user: admin, pass: admin1234)
-            </button>
-          </div>
         </div>
       </div>
     </div>
