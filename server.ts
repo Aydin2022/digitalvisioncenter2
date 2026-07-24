@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
 import { fileURLToPath } from "url";
+import paymentRoutes from "./server-api/payments.js";
 
 // Safely derive current directory in both ESM and CJS environments
 const resolvedDistPath = typeof __dirname !== "undefined"
@@ -15,6 +16,9 @@ const PORT = 3000;
 
 // Body parsing middleware
 app.use(express.json());
+
+// Mount payment routes
+app.use("/api/payments/zaincash", paymentRoutes);
 
 // Helper function to get a Supabase client dynamically based on parameters or env variables
 function getSupabaseClient(url: string, key: string) {
