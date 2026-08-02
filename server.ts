@@ -71,7 +71,7 @@ if (fs.existsSync(".env.example")) {
 // Safely derive current directory in both ESM and CJS environments
 const resolvedDistPath = typeof __dirname !== "undefined"
   ? __dirname
-  : path.dirname(fileURLToPath(import.meta.url));
+  : (typeof import.meta !== "undefined" && import.meta?.url ? path.dirname(fileURLToPath(import.meta.url)) : process.cwd());
 
 // Initialize express app
 const app = express();
@@ -162,10 +162,19 @@ app.use(express.json());
 // Normalize URL path for serverless / Vercel rewrites if needed
 app.use((req, res, next) => {
   if (process.env.VERCEL) {
-    console.log(`[Vercel Serverless Request] Method: ${req.method}, URL: ${req.url}, OriginalURL: ${req.originalUrl}`);
-    if (req.url && !req.url.startsWith("/api")) {
-      req.url = "/api" + req.url;
+    let url = req.url || req.originalUrl || "";
+    // If Vercel rewrote request to /api/index.ts or /api/index
+    if (url.startsWith("/api/index.ts")) {
+      url = url.replace("/api/index.ts", "");
+    } else if (url.startsWith("/api/index")) {
+      url = url.replace("/api/index", "");
     }
+    if (!url || url === "") url = "/";
+    if (!url.startsWith("/api")) {
+      url = "/api" + url;
+    }
+    req.url = url;
+    console.log(`[Vercel Serverless] Method: ${req.method}, Normalized URL: ${req.url}`);
   }
   next();
 });
@@ -677,7 +686,8 @@ app.post("/api/zaincash/config", (req, res) => {
 
 // 1. Initiate ZainCash Transaction
 app.post("/api/zaincash/initiate", async (req, res) => {
-  const { amount, orderId, serviceType, lang, customerPhone, phone } = req.body;
+  const body = req.body || {};
+  const { amount, orderId, serviceType, lang, customerPhone, phone } = body;
 
   if (!amount || !orderId) {
     return res.status(400).json({ success: false, error: "Amount and Order ID are required." });
@@ -814,7 +824,8 @@ app.post("/api/zaincash/initiate", async (req, res) => {
       jwtPayload.msisdn = "";
     }
 
-    const token = jwt.sign(jwtPayload, ZAINCASH_CLIENT_SECRET, { algorithm: "HS256" });
+    const secretToUse = ZAINCASH_CLIENT_SECRET || "fallback_zaincash_secret";
+    const token = jwt.sign(jwtPayload, secretToUse, { algorithm: "HS256" });
 
     // Select target v1 domains based on configured URL and official ZainCash endpoints
     const defaultV1Domain = config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://api.zaincash.iq";
