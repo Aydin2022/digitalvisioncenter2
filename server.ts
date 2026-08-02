@@ -704,7 +704,7 @@ app.post(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
 });
 
 // Helper to fetch with a strict timeout to prevent serverless function hangs on Vercel
-async function fetchWithTimeout(url: string, options: any = {}, timeoutMs: number = 2500) {
+async function fetchWithTimeout(url: string, options: any = {}, timeoutMs: number = 1500) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -729,7 +729,6 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
   const ZAINCASH_CLIENT_SECRET = config.clientSecret;
   const ZAINCASH_API_URL = config.apiUrl;
 
-  // We only pass customer phone if provided explicitly by customer; otherwise leave blank so gateway input stays empty
   const rawCustomerPhone = (customerPhone || phone || "").toString().trim();
 
   // Build the self-referential callback URL using APP_URL or request host
@@ -738,18 +737,39 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
   const defaultCallback = `${protocol}://${host}/api/zaincash/callback`;
   const redirectUrl = process.env.APP_URL ? `${process.env.APP_URL}/api/zaincash/callback` : defaultCallback;
 
-  console.log(`[ZainCash] Initiating transaction via dynamic config. Mode: ${config.mode}, Amount: ${amount}, OrderId: ${orderId}, Callback URL: ${redirectUrl}`);
+  console.log(`[ZainCash] Initiating transaction. Mode: ${config.mode}, Amount: ${amount}, OrderId: ${orderId}`);
+
+  // Create standard ZainCash JWT token first so it is available for client fallback
+  let token = "";
+  try {
+    const jwtPayload: any = {
+      amount: Number(amount),
+      serviceType: String(serviceType || "Software License"),
+      orderId: String(orderId),
+      redirectUrl: String(redirectUrl),
+      iat: Math.floor(Date.now() / 1000) - 30,
+      exp: Math.floor(Date.now() / 1000) + 4 * 60 * 60,
+    };
+    if (rawCustomerPhone) {
+      jwtPayload.msisdn = rawCustomerPhone;
+    } else {
+      jwtPayload.msisdn = "";
+    }
+    const secretToUse = ZAINCASH_CLIENT_SECRET || "fallback_zaincash_secret";
+    token = jwt.sign(jwtPayload, secretToUse, { algorithm: "HS256" });
+  } catch (jwtErr: any) {
+    console.error(`[ZainCash] Error generating JWT token:`, jwtErr);
+  }
+
+  let lastErrorMsg = "";
 
   try {
-    // --- 1. ATTEMPT ZAINCASH API v2 FLOW (OAuth2 token + REST API) ---
+    // --- 1. ATTEMPT ZAINCASH API v2 FLOW ---
     const v2BaseUrl = ZAINCASH_API_URL 
       ? ZAINCASH_API_URL.trim().replace(/\/+$/, "").replace("pg-api-uat.zaincash.iq", "test.zaincash.iq")
       : (config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://pg-api.zaincash.iq");
 
-    let v2ErrorMsg = "";
-
     try {
-      console.log(`[ZainCash v2] Requesting OAuth2 token from ${v2BaseUrl}/oauth2/token...`);
       const tokenParams = new URLSearchParams({
         grant_type: "client_credentials",
         client_id: ZAINCASH_CLIENT_ID || "",
@@ -761,14 +781,12 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: tokenParams.toString()
-      }, 2500);
+      }, 1500);
 
       if (tokenRes.ok) {
         const tokenData = await tokenRes.json().catch(() => null);
         if (tokenData && tokenData.access_token) {
-          console.log(`[ZainCash v2] Received OAuth2 bearer token! Initializing transaction...`);
           const extRefId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
-
           const successCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=success` : `${redirectUrl}?status=success`;
           const failureCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=failed` : `${redirectUrl}?status=failed`;
 
@@ -776,18 +794,10 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
             language: lang === "ar" ? "ar" : "en",
             externalReferenceId: extRefId,
             orderId: String(orderId),
-            amount: {
-              value: String(amount),
-              currency: "IQD"
-            },
+            amount: { value: String(amount), currency: "IQD" },
             serviceType: String(serviceType || "Delivery"),
-            redirectUrls: {
-              successUrl: successCallbackUrl,
-              failureUrl: failureCallbackUrl
-            }
+            redirectUrls: { successUrl: successCallbackUrl, failureUrl: failureCallbackUrl }
           };
-
-          // Do NOT attach customer object so ZainCash checkout page leaves wallet number empty for user input
 
           const initRes = await fetchWithTimeout(`${v2BaseUrl}/api/v2/payment-gateway/transaction/init`, {
             method: "POST",
@@ -796,9 +806,9 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
               "Authorization": `Bearer ${tokenData.access_token}`
             },
             body: JSON.stringify(v2Payload)
-          }, 2500);
+          }, 1500);
 
-          const initText = await initRes.text();
+          const initText = await initRes.text().catch(() => "");
           let initData: any = null;
           try { initData = JSON.parse(initText); } catch (e) {}
 
@@ -806,93 +816,32 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
             const txId = initData.id || initData.transactionId || initData.referenceId;
             let targetRedirectUrl = initData.redirectUrl || initData.url || initData.paymentUrl;
             if (!targetRedirectUrl && txId) {
-              if (initData.token) {
-                targetRedirectUrl = `https://pg.zaincash.iq/transaction/pay?id=${txId}&token=${initData.token}`;
-              } else {
-                targetRedirectUrl = `${v2BaseUrl}/transaction/pay?id=${txId}`;
-              }
+              targetRedirectUrl = `${v2BaseUrl}/transaction/pay?id=${txId}`;
             }
             if (targetRedirectUrl) {
-              console.log(`[ZainCash v2] Success! Created transaction ID: ${txId}. Redirect: ${targetRedirectUrl}`);
               return res.json({
                 success: true,
                 transactionId: txId || orderId,
                 redirectUrl: targetRedirectUrl,
               });
             }
-          } else {
-            console.warn(`[ZainCash v2] Transaction init response (HTTP ${initRes.status}):`, initText);
-            v2ErrorMsg = initData?.message || initData?.msg || initData?.error || `HTTP ${initRes.status}`;
           }
         }
-      } else {
-        const tokenErrText = await tokenRes.text().catch(() => "");
-        console.warn(`[ZainCash v2] OAuth token request failed (HTTP ${tokenRes.status}): ${tokenErrText}`);
-        let tokenErrObj: any = null;
-        try { tokenErrObj = JSON.parse(tokenErrText); } catch(e) {}
-        v2ErrorMsg = tokenErrObj?.error || tokenErrObj?.message || `HTTP ${tokenRes.status}`;
       }
     } catch (v2Err: any) {
-      console.warn(`[ZainCash v2] Error during v2 OAuth flow:`, v2Err?.message || v2Err);
-      v2ErrorMsg = v2Err?.message || String(v2Err);
+      lastErrorMsg = `v2: ${v2Err?.message || v2Err}`;
     }
 
-    // --- 2. FALLBACK TO ZAINCASH API v1 JWT FLOW ---
-    console.log(`[ZainCash v1] Trying legacy v1 JWT flow...`);
-    const jwtPayload: any = {
-      amount: Number(amount),
-      serviceType: String(serviceType || "Software License"),
-      orderId: String(orderId),
-      redirectUrl: String(redirectUrl),
-      iat: Math.floor(Date.now() / 1000) - 30, // allow 30 seconds clock skew
-      exp: Math.floor(Date.now() / 1000) + 4 * 60 * 60, // 4 hours validity
-    };
+    // --- 2. ATTEMPT ZAINCASH API v1 FLOW ---
+    if (token) {
+      const defaultV1Domain = config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://api.zaincash.iq";
+      const targetInitUrl = `${defaultV1Domain}/transaction/init`;
 
-    if (rawCustomerPhone) {
-      jwtPayload.msisdn = rawCustomerPhone;
-    } else {
-      // Pass empty string so ZainCash portal wallet number field is left empty for end user input
-      jwtPayload.msisdn = "";
-    }
-
-    const secretToUse = ZAINCASH_CLIENT_SECRET || "fallback_zaincash_secret";
-    const token = jwt.sign(jwtPayload, secretToUse, { algorithm: "HS256" });
-
-    // Select target v1 domains based on configured URL and official ZainCash endpoints
-    const defaultV1Domain = config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://api.zaincash.iq";
-    const customV1Domain = ZAINCASH_API_URL ? ZAINCASH_API_URL.replace("pg-api.zaincash.iq", "api.zaincash.iq").replace("pg-api-uat.zaincash.iq", "test.zaincash.iq") : "";
-    
-    const domains = [defaultV1Domain, customV1Domain].filter(Boolean);
-
-    const uniqueDomains: string[] = [];
-    for (const dom of domains) {
-      if (!dom) continue;
-      let normalized = dom.trim().replace(/\/+$/, "");
-      if (!uniqueDomains.includes(normalized)) {
-        uniqueDomains.push(normalized);
-      }
-    }
-
-    const candidates: Array<{ initiateUrl: string; payUrl: string }> = [];
-    for (const dom of uniqueDomains) {
-      candidates.push({
-        initiateUrl: `${dom}/transaction/init`,
-        payUrl: `${dom}/transaction/pay`,
-      });
-    }
-
-    let successData: any = null;
-    let successPayUrlBase: string = "";
-    let lastErrorMsg: string = "";
-
-    for (const candidate of candidates) {
-      console.log(`[ZainCash] Trying endpoint: ${candidate.initiateUrl}`);
-      
-      const requestsToTry = [
-        {
+      try {
+        const response = await fetchWithTimeout(targetInitUrl, {
+          method: "POST",
           headers: {
             "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json"
           },
           body: new URLSearchParams({
@@ -900,86 +849,57 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
             merchantId: ZAINCASH_CLIENT_ID || "",
             lang: lang || "en"
           }).toString()
-        },
-        {
-          headers: {
-            "Content-Type": "application/json",
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-          },
-          body: JSON.stringify({
-            token: token,
-            merchantId: ZAINCASH_CLIENT_ID || "",
-            lang: lang || "en",
-          })
-        }
-      ];
+        }, 1500);
 
-      for (const reqConfig of requestsToTry) {
-        try {
-          const response = await fetchWithTimeout(candidate.initiateUrl, {
-            method: "POST",
-            headers: reqConfig.headers,
-            body: reqConfig.body,
-          }, 2500);
+        const status = response.status;
+        const text = await response.text().catch(() => "");
 
-          const status = response.status;
-          const text = await response.text();
-
-          if (status === 200) {
-            try {
-              const parsed = JSON.parse(text);
-              if (parsed.id) {
-                successData = parsed;
-                successPayUrlBase = candidate.payUrl;
-                console.log(`[ZainCash] Successfully initiated via ${candidate.initiateUrl}`);
-                break;
-              } else if (parsed.err) {
-                const errStr = typeof parsed.err === 'string' ? parsed.err : (parsed.err.msg || JSON.stringify(parsed.err));
-                lastErrorMsg = errStr;
-              } else {
-                lastErrorMsg = JSON.stringify(parsed);
-              }
-            } catch (e: any) {
-              lastErrorMsg = `Invalid JSON response: ${e.message}`;
+        if (status === 200) {
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed.id) {
+              const payUrl = `${defaultV1Domain}/transaction/pay?id=${parsed.id}`;
+              return res.json({
+                success: true,
+                transactionId: parsed.id,
+                redirectUrl: payUrl,
+              });
+            } else if (parsed.err) {
+              lastErrorMsg = typeof parsed.err === 'string' ? parsed.err : (parsed.err.msg || JSON.stringify(parsed.err));
             }
-          } else {
-            // Strip HTML tags if response is HTML error page
-            const isHtml = text.trim().startsWith("<") || text.includes("<!DOCTYPE") || text.includes("<html");
-            lastErrorMsg = isHtml ? `HTTP ${status}: ${response.statusText || 'Server Error'}` : `HTTP ${status}: ${text.substring(0, 100)}`;
+          } catch (e: any) {
+            lastErrorMsg = `Invalid JSON: ${e.message}`;
           }
-        } catch (err: any) {
-          lastErrorMsg = `Network Error: ${err?.message || err}`;
+        } else {
+          lastErrorMsg = `HTTP ${status}`;
         }
-      }
-
-      if (successData) {
-        break;
+      } catch (v1Err: any) {
+        lastErrorMsg = `v1: ${v1Err?.message || v1Err}`;
       }
     }
 
-    if (!successData) {
-      console.log(`[ZainCash] Client-side checkout fallback active (${lastErrorMsg})`);
-      return res.json({
-        success: true,
-        fallbackToClient: true,
-        token: token,
-        clientId: ZAINCASH_CLIENT_ID,
-        apiUrl: config.apiUrl ? config.apiUrl.replace("pg-api.zaincash.iq", "api.zaincash.iq") : "https://test.zaincash.iq",
-        mode: config.mode,
-        warning: lastErrorMsg
-      });
-    }
-
-    const payUrl = `${successPayUrlBase}?id=${successData.id}`;
+    // Fallback gracefully to client-side initiation
     return res.json({
       success: true,
-      transactionId: successData.id,
-      redirectUrl: payUrl,
+      fallbackToClient: true,
+      token: token,
+      clientId: ZAINCASH_CLIENT_ID,
+      apiUrl: config.apiUrl ? config.apiUrl.replace("pg-api.zaincash.iq", "api.zaincash.iq") : "https://test.zaincash.iq",
+      mode: config.mode,
+      warning: lastErrorMsg || "Serverless direct connection bypassed; connecting via client gateway."
     });
+
   } catch (error: any) {
-    console.error(`[ZainCash] Initiation failed:`, error);
-    return res.status(500).json({ success: false, error: error?.message || "Internal error during payment initiation" });
+    console.error(`[ZainCash] Initiation error:`, error);
+    return res.json({
+      success: true,
+      fallbackToClient: true,
+      token: token,
+      clientId: ZAINCASH_CLIENT_ID,
+      apiUrl: config.apiUrl ? config.apiUrl.replace("pg-api.zaincash.iq", "api.zaincash.iq") : "https://test.zaincash.iq",
+      mode: config.mode,
+      warning: error?.message || "Unexpected server error handled gracefully."
+    });
   }
 });
 
