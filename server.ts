@@ -158,10 +158,25 @@ function getZainCashConfig() {
 
 // Safe body parsing middleware for standalone & serverless environments
 app.use((req: any, res: any, next: any) => {
-  if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+  if (process.env.VERCEL || req.body !== undefined) {
+    if (typeof req.body === "string" && req.body.trim()) {
+      try {
+        req.body = JSON.parse(req.body);
+      } catch (e) {
+        // Keep string if not valid JSON
+      }
+    }
+    req.body = req.body || {};
     return next();
   }
-  express.json()(req, res, next);
+
+  express.json({ limit: "10mb" })(req, res, (err: any) => {
+    if (err) {
+      console.error("[JSON Parse Error]:", err);
+      return res.status(400).json({ success: false, error: "Invalid JSON body" });
+    }
+    next();
+  });
 });
 
 // Normalize URL path for serverless / Vercel rewrites if needed
