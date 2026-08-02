@@ -154,6 +154,14 @@ function getZainCashConfig() {
 // Body parsing middleware
 app.use(express.json());
 
+// Normalize URL path for serverless / Vercel rewrites if needed
+app.use((req, res, next) => {
+  if (process.env.VERCEL && req.url && !req.url.startsWith("/api")) {
+    req.url = "/api" + req.url;
+  }
+  next();
+});
+
 // --- PASSWORD RESET & EMAIL DISPATCH SERVICES ---
 
 // 1. Send Reset Code via Email
@@ -1117,4 +1125,8 @@ async function startServer() {
   });
 }
 
-startServer();
+if (!process.env.VERCEL) {
+  startServer();
+}
+
+export default app;
