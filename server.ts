@@ -162,19 +162,38 @@ app.use(express.json());
 // Normalize URL path for serverless / Vercel rewrites if needed
 app.use((req, res, next) => {
   if (process.env.VERCEL) {
-    let url = req.url || req.originalUrl || "";
-    // If Vercel rewrote request to /api/index.ts or /api/index
-    if (url.startsWith("/api/index.ts")) {
-      url = url.replace("/api/index.ts", "");
-    } else if (url.startsWith("/api/index")) {
-      url = url.replace("/api/index", "");
+    const matchedPath = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string) || "";
+    const origUrl = req.originalUrl || "";
+    const currentUrl = req.url || "";
+
+    let effectiveUrl = "";
+    if (matchedPath && !matchedPath.includes("index.ts") && !matchedPath.includes("index.js")) {
+      effectiveUrl = matchedPath;
+    } else if (origUrl && !origUrl.includes("index.ts") && !origUrl.includes("index.js")) {
+      effectiveUrl = origUrl;
+    } else if (currentUrl && !currentUrl.includes("index.ts") && !currentUrl.includes("index.js")) {
+      effectiveUrl = currentUrl;
+    } else {
+      effectiveUrl = currentUrl || origUrl || matchedPath;
     }
-    if (!url || url === "") url = "/";
-    if (!url.startsWith("/api")) {
-      url = "/api" + url;
+
+    effectiveUrl = effectiveUrl.replace(/^\/api\/api\//, "/api/");
+    if (effectiveUrl.startsWith("/api/index.ts")) {
+      effectiveUrl = effectiveUrl.replace("/api/index.ts", "");
+    } else if (effectiveUrl.startsWith("/api/index")) {
+      effectiveUrl = effectiveUrl.replace("/api/index", "");
     }
-    req.url = url;
-    console.log(`[Vercel Serverless] Method: ${req.method}, Normalized URL: ${req.url}`);
+
+    if (!effectiveUrl || effectiveUrl === "" || effectiveUrl.startsWith("?")) {
+      effectiveUrl = "/";
+    }
+
+    if (!effectiveUrl.startsWith("/api")) {
+      effectiveUrl = "/api" + (effectiveUrl.startsWith("/") ? effectiveUrl : "/" + effectiveUrl);
+    }
+
+    req.url = effectiveUrl;
+    console.log(`[Vercel Serverless] Method: ${req.method}, Effective URL: ${req.url} (raw: ${currentUrl}, orig: ${origUrl}, matched: ${matchedPath})`);
   }
   next();
 });
@@ -653,13 +672,13 @@ app.post("/api/supabase/delete-user", async (req, res) => {
 // --- ZAINCASH PAYMENT GATEWAY INTEGRATION ---
 
 // GET current ZainCash configuration (with fallback)
-app.get("/api/zaincash/config", (req, res) => {
+app.get(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
   const config = getZainCashConfig();
   return res.json({ success: true, config });
 });
 
 // POST save ZainCash configuration
-app.post("/api/zaincash/config", (req, res) => {
+app.post(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
   const { clientId, clientSecret, msisdn, mode } = req.body;
   
   const config = {
@@ -697,7 +716,7 @@ async function fetchWithTimeout(url: string, options: any = {}, timeoutMs: numbe
 }
 
 // 1. Initiate ZainCash Transaction
-app.post("/api/zaincash/initiate", async (req, res) => {
+app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
   const body = req.body || {};
   const { amount, orderId, serviceType, lang, customerPhone, phone } = body;
 
@@ -965,7 +984,7 @@ app.post("/api/zaincash/initiate", async (req, res) => {
 });
 
 // 2. Callback from ZainCash redirect after success or failure
-app.get("/api/zaincash/callback", async (req, res) => {
+app.all(["/api/zaincash/callback", "/zaincash/callback"], async (req, res) => {
   const { token, status: qStatus, orderId: qOrderId, id: qId, msg: qMsg, error: qError } = req.query;
 
   let finalStatus = "failed";

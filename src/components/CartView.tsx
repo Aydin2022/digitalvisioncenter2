@@ -118,10 +118,12 @@ export default function CartView({
         });
 
         let data: any = null;
+        let responseText = '';
         try {
-          data = await response.json();
+          responseText = await response.text();
+          data = JSON.parse(responseText);
         } catch (jsonErr) {
-          console.error("ZainCash initiate response is not valid JSON:", jsonErr);
+          console.error("ZainCash initiate response is not valid JSON:", responseText, jsonErr);
         }
 
         if (response.ok && data && data.success) {
@@ -254,7 +256,7 @@ export default function CartView({
           }
         } else {
           setIsOrdering(false);
-          const errMsg = data.error || (lang === 'ar' ? 'فشل الاتصال ببوابة الدفع الإلكتروني.' : 'Failed to initialize ZainCash gateway transaction.');
+          const errMsg = data?.error || (lang === 'ar' ? 'فشل الاتصال ببوابة الدفع الإلكتروني.' : 'Failed to initialize ZainCash gateway transaction.');
           setZaincashError(errMsg);
           addLog(`ZainCash gateway error: ${errMsg}.`, 'error');
           db.updateOrderStatus(newOrder.id, 'cancelled');
