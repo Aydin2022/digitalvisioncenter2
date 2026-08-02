@@ -684,6 +684,18 @@ app.post("/api/zaincash/config", (req, res) => {
   }
 });
 
+// Helper to fetch with a strict timeout to prevent serverless function hangs on Vercel
+async function fetchWithTimeout(url: string, options: any = {}, timeoutMs: number = 2500) {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { ...options, signal: controller.signal });
+    return res;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 // 1. Initiate ZainCash Transaction
 app.post("/api/zaincash/initiate", async (req, res) => {
   const body = req.body || {};
@@ -702,7 +714,7 @@ app.post("/api/zaincash/initiate", async (req, res) => {
   const rawCustomerPhone = (customerPhone || phone || "").toString().trim();
 
   // Build the self-referential callback URL using APP_URL or request host
-  const host = req.get("host") || "localhost:3000";
+  const host = req.headers.host || (typeof req.get === "function" ? req.get("host") : "") || "localhost:3000";
   const protocol = req.secure || req.headers["x-forwarded-proto"] === "https" ? "https" : "http";
   const defaultCallback = `${protocol}://${host}/api/zaincash/callback`;
   const redirectUrl = process.env.APP_URL ? `${process.env.APP_URL}/api/zaincash/callback` : defaultCallback;
@@ -726,17 +738,17 @@ app.post("/api/zaincash/initiate", async (req, res) => {
         scope: "payment:write payment:read"
       });
 
-      const tokenRes = await fetch(`${v2BaseUrl}/oauth2/token`, {
+      const tokenRes = await fetchWithTimeout(`${v2BaseUrl}/oauth2/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: tokenParams.toString()
-      });
+      }, 2500);
 
       if (tokenRes.ok) {
         const tokenData = await tokenRes.json().catch(() => null);
         if (tokenData && tokenData.access_token) {
           console.log(`[ZainCash v2] Received OAuth2 bearer token! Initializing transaction...`);
-          const extRefId = crypto.randomUUID();
+          const extRefId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
 
           const successCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=success` : `${redirectUrl}?status=success`;
           const failureCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=failed` : `${redirectUrl}?status=failed`;
@@ -758,14 +770,14 @@ app.post("/api/zaincash/initiate", async (req, res) => {
 
           // Do NOT attach customer object so ZainCash checkout page leaves wallet number empty for user input
 
-          const initRes = await fetch(`${v2BaseUrl}/api/v2/payment-gateway/transaction/init`, {
+          const initRes = await fetchWithTimeout(`${v2BaseUrl}/api/v2/payment-gateway/transaction/init`, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${tokenData.access_token}`
             },
             body: JSON.stringify(v2Payload)
-          });
+          }, 2500);
 
           const initText = await initRes.text();
           let initData: any = null;
@@ -802,8 +814,8 @@ app.post("/api/zaincash/initiate", async (req, res) => {
         v2ErrorMsg = tokenErrObj?.error || tokenErrObj?.message || `HTTP ${tokenRes.status}`;
       }
     } catch (v2Err: any) {
-      console.warn(`[ZainCash v2] Error during v2 OAuth flow:`, v2Err.message);
-      v2ErrorMsg = v2Err.message;
+      console.warn(`[ZainCash v2] Error during v2 OAuth flow:`, v2Err?.message || v2Err);
+      v2ErrorMsg = v2Err?.message || String(v2Err);
     }
 
     // --- 2. FALLBACK TO ZAINCASH API v1 JWT FLOW ---
@@ -886,11 +898,11 @@ app.post("/api/zaincash/initiate", async (req, res) => {
 
       for (const reqConfig of requestsToTry) {
         try {
-          const response = await fetch(candidate.initiateUrl, {
+          const response = await fetchWithTimeout(candidate.initiateUrl, {
             method: "POST",
             headers: reqConfig.headers,
             body: reqConfig.body,
-          });
+          }, 2500);
 
           const status = response.status;
           const text = await response.text();

@@ -117,9 +117,14 @@ export default function CartView({
           })
         });
 
-        const data = await response.json();
+        let data: any = null;
+        try {
+          data = await response.json();
+        } catch (jsonErr) {
+          console.error("ZainCash initiate response is not valid JSON:", jsonErr);
+        }
 
-        if (response.ok && data.success) {
+        if (response.ok && data && data.success) {
           if (data.fallbackToClient) {
             addLog(`Connecting directly to ZainCash payment portal...`, 'info');
             const isTest = data.mode === 'sandbox' || !data.clientId || data.clientId === '5c649264111a345c7e8b4567' || data.clientId.startsWith('5c649264');
