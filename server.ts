@@ -91,28 +91,22 @@ function sanitizeCredential(val: string | undefined): string {
   return s.trim();
 }
 
+// Helper to check if a value is a placeholder or invalid credential
+function isPlaceholder(val: string | undefined): boolean {
+  if (!val) return true;
+  const s = val.trim().toLowerCase();
+  return (
+    s === "" ||
+    s.includes("your_") ||
+    s.includes("my_") ||
+    s.includes("_here") ||
+    s.includes("placeholder") ||
+    s === "9647700000000"
+  );
+}
+
 // Helper to load ZainCash Configuration dynamically
 function getZainCashConfig() {
-  let envID = process.env.ZAINCASH_CLIENT_ID;
-  let envSecret = process.env.ZAINCASH_CLIENT_SECRET;
-  let envMSISDN = process.env.ZAINCASH_MSISDN;
-  let envAPIUrl = process.env.ZAINCASH_API_URL;
-
-  if (fs.existsSync(".env.example")) {
-    try {
-      const parsed = dotenv.parse(fs.readFileSync(".env.example"));
-      if (parsed.ZAINCASH_CLIENT_ID) envID = parsed.ZAINCASH_CLIENT_ID;
-      if (parsed.ZAINCASH_CLIENT_SECRET) envSecret = parsed.ZAINCASH_CLIENT_SECRET;
-      if (parsed.ZAINCASH_MSISDN) envMSISDN = parsed.ZAINCASH_MSISDN;
-      if (parsed.ZAINCASH_API_URL) envAPIUrl = parsed.ZAINCASH_API_URL;
-    } catch (e) {}
-  }
-
-  const clientId = sanitizeCredential(envID);
-  const clientSecret = sanitizeCredential(envSecret);
-  const msisdn = sanitizeCredential(envMSISDN) || "9647835077893";
-  let apiUrl = sanitizeCredential(envAPIUrl) || "https://pg-api-uat.zaincash.iq";
-
   let fileData: any = null;
   try {
     if (fs.existsSync("./zaincash-config.json")) {
@@ -122,18 +116,31 @@ function getZainCashConfig() {
     console.error("Error reading zaincash-config.json:", err);
   }
 
-  const finalClientId = fileData?.clientId ? sanitizeCredential(fileData.clientId) : clientId;
-  const finalClientSecret = fileData?.clientSecret ? sanitizeCredential(fileData.clientSecret) : clientSecret;
-  const finalMsisdn = fileData?.msisdn ? sanitizeCredential(fileData.msisdn) : msisdn;
+  const envID = sanitizeCredential(process.env.ZAINCASH_CLIENT_ID);
+  const envSecret = sanitizeCredential(process.env.ZAINCASH_CLIENT_SECRET);
+  const envMSISDN = sanitizeCredential(process.env.ZAINCASH_MSISDN);
+  const envAPIUrl = sanitizeCredential(process.env.ZAINCASH_API_URL);
 
-  // Determine if credentials belong to ZainCash Test/Sandbox/UAT environment
+  const fileID = fileData?.clientId ? sanitizeCredential(fileData.clientId) : "";
+  const fileSecret = fileData?.clientSecret ? sanitizeCredential(fileData.clientSecret) : "";
+  const fileMSISDN = fileData?.msisdn ? sanitizeCredential(fileData.msisdn) : "";
+  const fileAPIUrl = fileData?.apiUrl ? sanitizeCredential(fileData.apiUrl) : "";
+
+  const finalClientId = !isPlaceholder(envID) ? envID : (!isPlaceholder(fileID) ? fileID : "");
+  const finalClientSecret = !isPlaceholder(envSecret) ? envSecret : (!isPlaceholder(fileSecret) ? fileSecret : "");
+  const finalMsisdn = !isPlaceholder(envMSISDN) ? envMSISDN : (!isPlaceholder(fileMSISDN) ? fileMSISDN : "9647708506036");
+
+  // Determine if credentials belong to test/sandbox merchant
   const isTestMerchant = !finalClientId || finalClientId === "5c649264111a345c7e8b4567" || finalClientId.startsWith("5c649264");
-  
   const rawMode = fileData?.mode || (isTestMerchant ? "sandbox" : "production");
   const mode = isTestMerchant ? "sandbox" : (rawMode === "production" ? "production" : "sandbox");
 
-  // Choose URL based on mode or user override (pg-api-uat.zaincash.iq is official ZainCash UAT URL)
-  let finalApiUrl = fileData?.apiUrl || apiUrl || (mode === "sandbox" ? "https://pg-api-uat.zaincash.iq" : "https://api.zaincash.iq");
+  let rawUrl = !isPlaceholder(envAPIUrl) ? envAPIUrl : (!isPlaceholder(fileAPIUrl) ? fileAPIUrl : "");
+  if (rawUrl.includes("pg-api-uat.zaincash.iq")) {
+    rawUrl = "";
+  }
+
+  const finalApiUrl = rawUrl || (mode === "sandbox" ? "https://test.zaincash.iq" : "https://pg-api.zaincash.iq");
 
   return {
     clientId: finalClientId,
@@ -675,8 +682,8 @@ app.post("/api/zaincash/initiate", async (req, res) => {
   try {
     // --- 1. ATTEMPT ZAINCASH API v2 FLOW (OAuth2 token + REST API) ---
     const v2BaseUrl = ZAINCASH_API_URL 
-      ? ZAINCASH_API_URL.trim().replace(/\/+$/, "") 
-      : (config.mode === "sandbox" ? "https://pg-api-uat.zaincash.iq" : "https://pg-api.zaincash.iq");
+      ? ZAINCASH_API_URL.trim().replace(/\/+$/, "").replace("pg-api-uat.zaincash.iq", "test.zaincash.iq")
+      : (config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://pg-api.zaincash.iq");
 
     let v2ErrorMsg = "";
 
