@@ -162,21 +162,31 @@ app.use(express.json());
 // Normalize URL path for serverless / Vercel rewrites if needed
 app.use((req, res, next) => {
   if (process.env.VERCEL) {
+    const queryPath = (req.query?.__path as string) || "";
+    const fwdUri = (req.headers["x-forwarded-uri"] as string) || "";
+    const realUrl = (req.headers["x-real-url"] as string) || "";
     const matchedPath = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string) || "";
     const origUrl = req.originalUrl || "";
     const currentUrl = req.url || "";
 
     let effectiveUrl = "";
-    if (matchedPath && !matchedPath.includes("index.ts") && !matchedPath.includes("index.js")) {
-      effectiveUrl = matchedPath;
+    if (queryPath) {
+      effectiveUrl = queryPath.startsWith("/api") ? queryPath : "/api" + (queryPath.startsWith("/") ? queryPath : "/" + queryPath);
+    } else if (fwdUri && !fwdUri.includes("index.ts") && !fwdUri.includes("index.js")) {
+      effectiveUrl = fwdUri;
+    } else if (realUrl && !realUrl.includes("index.ts") && !realUrl.includes("index.js")) {
+      effectiveUrl = realUrl;
     } else if (origUrl && !origUrl.includes("index.ts") && !origUrl.includes("index.js")) {
       effectiveUrl = origUrl;
+    } else if (matchedPath && !matchedPath.includes("index.ts") && !matchedPath.includes("index.js")) {
+      effectiveUrl = matchedPath;
     } else if (currentUrl && !currentUrl.includes("index.ts") && !currentUrl.includes("index.js")) {
       effectiveUrl = currentUrl;
     } else {
       effectiveUrl = currentUrl || origUrl || matchedPath;
     }
 
+    effectiveUrl = effectiveUrl.split("?")[0]; // remove query string from URL path matching
     effectiveUrl = effectiveUrl.replace(/^\/api\/api\//, "/api/");
     if (effectiveUrl.startsWith("/api/index.ts")) {
       effectiveUrl = effectiveUrl.replace("/api/index.ts", "");
@@ -184,7 +194,7 @@ app.use((req, res, next) => {
       effectiveUrl = effectiveUrl.replace("/api/index", "");
     }
 
-    if (!effectiveUrl || effectiveUrl === "" || effectiveUrl.startsWith("?")) {
+    if (!effectiveUrl || effectiveUrl === "") {
       effectiveUrl = "/";
     }
 
@@ -193,7 +203,7 @@ app.use((req, res, next) => {
     }
 
     req.url = effectiveUrl;
-    console.log(`[Vercel Serverless] Method: ${req.method}, Effective URL: ${req.url} (raw: ${currentUrl}, orig: ${origUrl}, matched: ${matchedPath})`);
+    console.log(`[Vercel Serverless] Method: ${req.method}, Effective URL: ${req.url} (queryPath: ${queryPath}, fwdUri: ${fwdUri}, origUrl: ${origUrl})`);
   }
   next();
 });
@@ -1099,6 +1109,15 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
+
+// 404 Unmatched API Route Handler for Serverless
+app.use((req, res) => {
+  console.warn(`[404 Handler] Unmatched route: ${req.method} ${req.url}`);
+  return res.status(404).json({
+    success: false,
+    error: `API route not found: ${req.method} ${req.url}`
+  });
+});
 
 // Global Express Error Handler
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
