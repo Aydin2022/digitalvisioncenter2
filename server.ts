@@ -1,6 +1,5 @@
 import express from "express";
 import path from "path";
-import { createServer as createViteServer } from "vite";
 import { createClient } from "@supabase/supabase-js";
 import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
@@ -109,7 +108,13 @@ function isPlaceholder(val: string | undefined): boolean {
 function getZainCashConfig() {
   let fileData: any = null;
   try {
-    if (fs.existsSync("./zaincash-config.json")) {
+    const tmpPath = "/tmp/zaincash-config.json";
+    const localPath = path.join(process.cwd(), "zaincash-config.json");
+    if (fs.existsSync(tmpPath)) {
+      fileData = JSON.parse(fs.readFileSync(tmpPath, "utf8"));
+    } else if (fs.existsSync(localPath)) {
+      fileData = JSON.parse(fs.readFileSync(localPath, "utf8"));
+    } else if (fs.existsSync("./zaincash-config.json")) {
       fileData = JSON.parse(fs.readFileSync("./zaincash-config.json", "utf8"));
     }
   } catch (err) {
@@ -156,8 +161,11 @@ app.use(express.json());
 
 // Normalize URL path for serverless / Vercel rewrites if needed
 app.use((req, res, next) => {
-  if (process.env.VERCEL && req.url && !req.url.startsWith("/api")) {
-    req.url = "/api" + req.url;
+  if (process.env.VERCEL) {
+    console.log(`[Vercel Serverless Request] Method: ${req.method}, URL: ${req.url}, OriginalURL: ${req.originalUrl}`);
+    if (req.url && !req.url.startsWith("/api")) {
+      req.url = "/api" + req.url;
+    }
   }
   next();
 });
@@ -654,7 +662,11 @@ app.post("/api/zaincash/config", (req, res) => {
   };
 
   try {
-    fs.writeFileSync("./zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
+    try {
+      fs.writeFileSync("./zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
+    } catch (writeErr) {
+      fs.writeFileSync("/tmp/zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
+    }
     console.log("[ZainCash] Config saved dynamically:", config);
     return res.json({ success: true, config });
   } catch (err: any) {
@@ -1104,6 +1116,7 @@ async function startServer() {
   console.log(`[Server Startup] Detected Mode: ${isProduction ? "PRODUCTION" : "DEVELOPMENT"}`);
 
   if (!isProduction) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: "spa",
@@ -1124,6 +1137,18 @@ async function startServer() {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
+
+// Global Express Error Handler
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error("[Global Express Error]:", err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  return res.status(500).json({
+    success: false,
+    error: err?.message || "Internal server error"
+  });
+});
 
 if (!process.env.VERCEL) {
   startServer();
