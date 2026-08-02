@@ -1,7 +1,6 @@
 import express from "express";
 import path from "path";
 import { createClient } from "@supabase/supabase-js";
-import { fileURLToPath } from "url";
 import jwt from "jsonwebtoken";
 import fs from "fs";
 import dotenv from "dotenv";
@@ -69,9 +68,7 @@ if (fs.existsSync(".env.example")) {
 }
 
 // Safely derive current directory in both ESM and CJS environments
-const resolvedDistPath = typeof __dirname !== "undefined"
-  ? __dirname
-  : (typeof import.meta !== "undefined" && import.meta?.url ? path.dirname(fileURLToPath(import.meta.url)) : process.cwd());
+const resolvedDistPath = typeof __dirname !== "undefined" ? __dirname : process.cwd();
 
 // Initialize express app
 const app = express();
@@ -1097,6 +1094,10 @@ app.all(["/api/zaincash/callback", "/zaincash/callback"], async (req, res) => {
 
 // Serve static assets and Vite development setup
 async function startServer() {
+  if (process.env.VERCEL) {
+    console.log("[Server Startup] Vercel environment detected. Skipping app.listen and dev server setup.");
+    return;
+  }
 
   const isProduction =
     process.env.NODE_ENV === "production" ||
