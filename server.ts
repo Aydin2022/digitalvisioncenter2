@@ -197,46 +197,48 @@ app.post("/api/send-reset-email", async (req, res) => {
   let mailError = "";
 
   // 1. Primary: Try Mailtrap Transactional Email API
-  const mailtrapToken = process.env.MAILTRAP_TOKEN || "4b1a15b2d362dcfacd03c3f6df814b8f";
+  const mailtrapToken = process.env.MAILTRAP_TOKEN;
   const mailtrapSenderEmail = process.env.MAILTRAP_SENDER_EMAIL || "hello@demomailtrap.co";
 
-  try {
-    const mailtrapResponse = await fetch("https://send.api.mailtrap.io/api/send", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${mailtrapToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        from: {
-          email: mailtrapSenderEmail,
-          name: isAr ? "مركز الرؤية الرقمية" : "Digital Vision Center"
+  if (mailtrapToken) {
+    try {
+      const mailtrapResponse = await fetch("https://send.api.mailtrap.io/api/send", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${mailtrapToken}`,
+          "Content-Type": "application/json"
         },
-        to: [
-          {
-            email: normalizedEmail
-          }
-        ],
-        subject: subject,
-        text: bodyText,
-        html: bodyHtml,
-        category: "Password Reset"
-      })
-    });
+        body: JSON.stringify({
+          from: {
+            email: mailtrapSenderEmail,
+            name: isAr ? "مركز الرؤية الرقمية" : "Digital Vision Center"
+          },
+          to: [
+            {
+              email: normalizedEmail
+            }
+          ],
+          subject: subject,
+          text: bodyText,
+          html: bodyHtml,
+          category: "Password Reset"
+        })
+      });
 
-    const mailtrapData = await mailtrapResponse.json();
+      const mailtrapData = await mailtrapResponse.json();
 
-    if (mailtrapResponse.ok && mailtrapData.success !== false) {
-      mailSuccess = true;
-      deliveredVia = "Mailtrap Real Email Service";
-      console.log(`[Mailtrap Email] Successfully delivered password reset email to ${normalizedEmail}:`, mailtrapData);
-    } else {
-      mailError = Array.isArray(mailtrapData.errors) ? mailtrapData.errors.join(", ") : (mailtrapData.message || JSON.stringify(mailtrapData));
-      console.warn(`[Mailtrap Email Warning] Mailtrap status ${mailtrapResponse.status}:`, mailError);
+      if (mailtrapResponse.ok && mailtrapData.success !== false) {
+        mailSuccess = true;
+        deliveredVia = "Mailtrap Real Email Service";
+        console.log(`[Mailtrap Email] Successfully delivered password reset email to ${normalizedEmail}:`, mailtrapData);
+      } else {
+        mailError = Array.isArray(mailtrapData.errors) ? mailtrapData.errors.join(", ") : (mailtrapData.message || JSON.stringify(mailtrapData));
+        console.warn(`[Mailtrap Email Warning] Mailtrap status ${mailtrapResponse.status}:`, mailError);
+      }
+    } catch (err: any) {
+      mailError = err?.message || String(err);
+      console.error(`[Mailtrap Email Fetch Error] Failed to reach Mailtrap API:`, mailError);
     }
-  } catch (err: any) {
-    mailError = err?.message || String(err);
-    console.error(`[Mailtrap Email Fetch Error] Failed to reach Mailtrap API:`, mailError);
   }
 
   // 2. Secondary Fallback: Try Nodemailer SMTP if Brevo failed or key missing

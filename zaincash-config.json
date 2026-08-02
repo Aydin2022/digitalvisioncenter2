@@ -1,7 +1,7 @@
 {
-  "clientId": "40374021812e459bb7bed6d7e555260d",
-  "clientSecret": "agnHrIFH8OIOt7YZADlf9VLMszNcbdoO",
-  "msisdn": "9647708506036",
-  "mode": "production",
-  "apiUrl": "https://pg-api.zaincash.iq"
+  "clientId": "your_zaincash_client_id_here",
+  "clientSecret": "your_zaincash_client_secret_here",
+  "msisdn": "9647700000000",
+  "mode": "sandbox",
+  "apiUrl": "https://pg-api-uat.zaincash.iq"
 }
