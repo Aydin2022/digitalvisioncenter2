@@ -156,26 +156,31 @@ function getZainCashConfig() {
   };
 }
 
-// Body parsing middleware
-app.use(express.json());
+// Safe body parsing middleware for standalone & serverless environments
+app.use((req: any, res: any, next: any) => {
+  if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
+    return next();
+  }
+  express.json()(req, res, next);
+});
 
 // Normalize URL path for serverless / Vercel rewrites if needed
 app.use((req, res, next) => {
   if (process.env.VERCEL) {
-    const queryPath = (req.query?.__path as string) || "";
     const fwdUri = (req.headers["x-forwarded-uri"] as string) || "";
     const realUrl = (req.headers["x-real-url"] as string) || "";
+    const queryPath = (req.query?.__path as string) || "";
     const matchedPath = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string) || "";
     const origUrl = req.originalUrl || "";
     const currentUrl = req.url || "";
 
     let effectiveUrl = "";
-    if (queryPath) {
-      effectiveUrl = queryPath.startsWith("/api") ? queryPath : "/api" + (queryPath.startsWith("/") ? queryPath : "/" + queryPath);
-    } else if (fwdUri && !fwdUri.includes("index.ts") && !fwdUri.includes("index.js")) {
+    if (fwdUri && !fwdUri.includes("index.ts") && !fwdUri.includes("index.js")) {
       effectiveUrl = fwdUri;
     } else if (realUrl && !realUrl.includes("index.ts") && !realUrl.includes("index.js")) {
       effectiveUrl = realUrl;
+    } else if (queryPath) {
+      effectiveUrl = queryPath.startsWith("/api") ? queryPath : "/api" + (queryPath.startsWith("/") ? queryPath : "/" + queryPath);
     } else if (origUrl && !origUrl.includes("index.ts") && !origUrl.includes("index.js")) {
       effectiveUrl = origUrl;
     } else if (matchedPath && !matchedPath.includes("index.ts") && !matchedPath.includes("index.js")) {
@@ -198,12 +203,12 @@ app.use((req, res, next) => {
       effectiveUrl = "/";
     }
 
-    if (!effectiveUrl.startsWith("/api")) {
+    if (!effectiveUrl.startsWith("/api") && effectiveUrl !== "/") {
       effectiveUrl = "/api" + (effectiveUrl.startsWith("/") ? effectiveUrl : "/" + effectiveUrl);
     }
 
     req.url = effectiveUrl;
-    console.log(`[Vercel Serverless] Method: ${req.method}, Effective URL: ${req.url} (queryPath: ${queryPath}, fwdUri: ${fwdUri}, origUrl: ${origUrl})`);
+    console.log(`[Vercel Serverless] Method: ${req.method}, Effective URL: ${req.url}`);
   }
   next();
 });
@@ -1110,9 +1115,9 @@ async function startServer() {
   });
 }
 
-// 404 Unmatched API Route Handler for Serverless
-app.use((req, res) => {
-  console.warn(`[404 Handler] Unmatched route: ${req.method} ${req.url}`);
+// 404 Unmatched API Route Handler for Serverless (Only for /api/*)
+app.use("/api/*", (req, res) => {
+  console.warn(`[404 Handler] Unmatched API route: ${req.method} ${req.url}`);
   return res.status(404).json({
     success: false,
     error: `API route not found: ${req.method} ${req.url}`
