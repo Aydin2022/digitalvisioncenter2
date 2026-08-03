@@ -47,24 +47,13 @@ function getMailTransporter() {
   return null;
 }
 
-// Load environment variables from .env and .env.example
+// Load environment variables from .env (local development only).
+// NOTE: we deliberately do NOT fall back to values from .env.example.
+// .env.example only holds placeholder text (e.g. "your_zaincash_client_id_here"),
+// and silently copying that into process.env when a real var is missing
+// makes misconfiguration invisible instead of producing a clear error.
 if (fs.existsSync(".env")) {
   dotenv.config({ path: ".env" });
-}
-if (fs.existsSync(".env.example")) {
-  try {
-    const exampleEnv = dotenv.parse(fs.readFileSync(".env.example"));
-    for (const k in exampleEnv) {
-      let val = exampleEnv[k] ? exampleEnv[k].trim() : "";
-      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
-      if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1);
-      if (!process.env[k] || process.env[k]!.trim() === "") {
-        process.env[k] = val.trim();
-      }
-    }
-  } catch (e) {
-    console.error("Error parsing .env.example:", e);
-  }
 }
 
 // Safely derive current directory in both ESM and CJS environments
@@ -101,43 +90,27 @@ function isPlaceholder(val: string | undefined): boolean {
   );
 }
 
-// Helper to load ZainCash Configuration dynamically
+// Helper to load ZainCash configuration from environment variables only.
+// IMPORTANT: this must not depend on writing to or reading from disk.
+// On Vercel the filesystem is read-only outside of /tmp, and /tmp is wiped
+// between invocations/cold starts, so a JSON-file config store can silently
+// hold stale or blank values there even if it works fine on Render. Set
+// these as real environment variables on EVERY platform this runs on.
 function getZainCashConfig() {
-  let fileData: any = null;
-  try {
-    const tmpPath = "/tmp/zaincash-config.json";
-    const localPath = path.join(process.cwd(), "zaincash-config.json");
-    if (fs.existsSync(tmpPath)) {
-      fileData = JSON.parse(fs.readFileSync(tmpPath, "utf8"));
-    } else if (fs.existsSync(localPath)) {
-      fileData = JSON.parse(fs.readFileSync(localPath, "utf8"));
-    } else if (fs.existsSync("./zaincash-config.json")) {
-      fileData = JSON.parse(fs.readFileSync("./zaincash-config.json", "utf8"));
-    }
-  } catch (err) {
-    console.error("Error reading zaincash-config.json:", err);
-  }
-
   const envID = sanitizeCredential(process.env.ZAINCASH_CLIENT_ID);
   const envSecret = sanitizeCredential(process.env.ZAINCASH_CLIENT_SECRET);
   const envMSISDN = sanitizeCredential(process.env.ZAINCASH_MSISDN);
   const envAPIUrl = sanitizeCredential(process.env.ZAINCASH_API_URL);
 
-  const fileID = fileData?.clientId ? sanitizeCredential(fileData.clientId) : "";
-  const fileSecret = fileData?.clientSecret ? sanitizeCredential(fileData.clientSecret) : "";
-  const fileMSISDN = fileData?.msisdn ? sanitizeCredential(fileData.msisdn) : "";
-  const fileAPIUrl = fileData?.apiUrl ? sanitizeCredential(fileData.apiUrl) : "";
+  const finalClientId = !isPlaceholder(envID) ? envID : "";
+  const finalClientSecret = !isPlaceholder(envSecret) ? envSecret : "";
+  const finalMsisdn = !isPlaceholder(envMSISDN) ? envMSISDN : "9647708506036";
 
-  const finalClientId = !isPlaceholder(envID) ? envID : (!isPlaceholder(fileID) ? fileID : "");
-  const finalClientSecret = !isPlaceholder(envSecret) ? envSecret : (!isPlaceholder(fileSecret) ? fileSecret : "");
-  const finalMsisdn = !isPlaceholder(envMSISDN) ? envMSISDN : (!isPlaceholder(fileMSISDN) ? fileMSISDN : "9647708506036");
-
-  // Determine if credentials belong to test/sandbox merchant
+  // Determine if credentials belong to the ZainCash public test/sandbox merchant
   const isTestMerchant = !finalClientId || finalClientId === "5c649264111a345c7e8b4567" || finalClientId.startsWith("5c649264");
-  const rawMode = fileData?.mode || (isTestMerchant ? "sandbox" : "production");
-  const mode = isTestMerchant ? "sandbox" : (rawMode === "production" ? "production" : "sandbox");
+  const mode = isTestMerchant ? "sandbox" : "production";
 
-  let rawUrl = !isPlaceholder(envAPIUrl) ? envAPIUrl : (!isPlaceholder(fileAPIUrl) ? fileAPIUrl : "");
+  let rawUrl = !isPlaceholder(envAPIUrl) ? envAPIUrl : "";
   if (rawUrl.includes("pg-api-uat.zaincash.iq")) {
     rawUrl = "";
   }
@@ -149,7 +122,8 @@ function getZainCashConfig() {
     clientSecret: finalClientSecret,
     msisdn: finalMsisdn,
     apiUrl: finalApiUrl,
-    mode
+    mode,
+    configured: !isPlaceholder(finalClientId) && !isPlaceholder(finalClientSecret)
   };
 }
 
@@ -704,30 +678,15 @@ app.get(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
   return res.json({ success: true, config });
 });
 
-// POST save ZainCash configuration
+// POST endpoint kept for backward compatibility, but config can no longer be
+// saved to disk: Vercel's filesystem is read-only outside /tmp (and /tmp
+// doesn't persist), so a file-based "save" silently did nothing useful there.
+// Credentials must be set as real environment variables on each platform.
 app.post(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
-  const { clientId, clientSecret, msisdn, mode } = req.body;
-  
-  const config = {
-    clientId: clientId || "",
-    clientSecret: clientSecret || "",
-    msisdn: msisdn || "",
-    mode: mode === "production" ? "production" : "sandbox",
-    apiUrl: mode === "production" ? "https://api.zaincash.iq" : "https://test.zaincash.iq"
-  };
-
-  try {
-    try {
-      fs.writeFileSync("./zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
-    } catch (writeErr) {
-      fs.writeFileSync("/tmp/zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
-    }
-    console.log("[ZainCash] Config saved dynamically:", config);
-    return res.json({ success: true, config });
-  } catch (err: any) {
-    console.error("[ZainCash] Failed to write config:", err);
-    return res.status(500).json({ success: false, error: "Failed to write configuration file." });
-  }
+  return res.status(410).json({
+    success: false,
+    error: "Saving ZainCash config via this endpoint is no longer supported. Set ZAINCASH_CLIENT_ID, ZAINCASH_CLIENT_SECRET, ZAINCASH_MSISDN, and ZAINCASH_API_URL as environment variables on each deployment platform (Render and Vercel each need their own copy), then redeploy."
+  });
 });
 
 // Helper to fetch with a strict timeout to prevent serverless function hangs on Vercel
@@ -755,6 +714,14 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
   const ZAINCASH_CLIENT_ID = config.clientId;
   const ZAINCASH_CLIENT_SECRET = config.clientSecret;
   const ZAINCASH_API_URL = config.apiUrl;
+
+  if (!config.configured) {
+    console.error("[ZainCash] Missing ZAINCASH_CLIENT_ID / ZAINCASH_CLIENT_SECRET environment variables on this deployment.");
+    return res.status(503).json({
+      success: false,
+      error: "ZainCash isn't configured on this deployment yet. Set ZAINCASH_CLIENT_ID and ZAINCASH_CLIENT_SECRET as environment variables, then redeploy."
+    });
+  }
 
   const rawCustomerPhone = (customerPhone || phone || "").toString().trim();
 
@@ -822,6 +789,7 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
             externalReferenceId: extRefId,
             orderId: String(orderId),
             amount: { value: String(amount), currency: "IQD" },
+            customer: { phone: rawCustomerPhone || config.msisdn },
             serviceType: String(serviceType || "Delivery"),
             redirectUrls: { successUrl: successCallbackUrl, failureUrl: failureCallbackUrl }
           };
