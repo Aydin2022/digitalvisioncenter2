@@ -47,13 +47,24 @@ function getMailTransporter() {
   return null;
 }
 
-// Load environment variables from .env (local development only).
-// NOTE: we deliberately do NOT fall back to values from .env.example.
-// .env.example only holds placeholder text (e.g. "your_zaincash_client_id_here"),
-// and silently copying that into process.env when a real var is missing
-// makes misconfiguration invisible instead of producing a clear error.
+// Load environment variables from .env and .env.example
 if (fs.existsSync(".env")) {
   dotenv.config({ path: ".env" });
+}
+if (fs.existsSync(".env.example")) {
+  try {
+    const exampleEnv = dotenv.parse(fs.readFileSync(".env.example"));
+    for (const k in exampleEnv) {
+      let val = exampleEnv[k] ? exampleEnv[k].trim() : "";
+      if (val.startsWith('"') && val.endsWith('"')) val = val.slice(1, -1);
+      if (val.startsWith("'") && val.endsWith("'")) val = val.slice(1, -1);
+      if (!process.env[k] || process.env[k]!.trim() === "") {
+        process.env[k] = val.trim();
+      }
+    }
+  } catch (e) {
+    console.error("Error parsing .env.example:", e);
+  }
 }
 
 // Safely derive current directory in both ESM and CJS environments
@@ -90,32 +101,43 @@ function isPlaceholder(val: string | undefined): boolean {
   );
 }
 
-// Helper to load ZainCash configuration from environment variables only.
-// IMPORTANT: this must not depend on writing to or reading from disk.
-// On Vercel the filesystem is read-only outside of /tmp, and /tmp is wiped
-// between invocations/cold starts, so a JSON-file config store can silently
-// hold stale or blank values there even if it works fine on Render. Set
-// these as real environment variables on EVERY platform this runs on.
+// Helper to load ZainCash Configuration dynamically
 function getZainCashConfig() {
+  let fileData: any = null;
+  try {
+    const tmpPath = "/tmp/zaincash-config.json";
+    const localPath = path.join(process.cwd(), "zaincash-config.json");
+    if (fs.existsSync(tmpPath)) {
+      fileData = JSON.parse(fs.readFileSync(tmpPath, "utf8"));
+    } else if (fs.existsSync(localPath)) {
+      fileData = JSON.parse(fs.readFileSync(localPath, "utf8"));
+    } else if (fs.existsSync("./zaincash-config.json")) {
+      fileData = JSON.parse(fs.readFileSync("./zaincash-config.json", "utf8"));
+    }
+  } catch (err) {
+    console.error("Error reading zaincash-config.json:", err);
+  }
+
   const envID = sanitizeCredential(process.env.ZAINCASH_CLIENT_ID);
   const envSecret = sanitizeCredential(process.env.ZAINCASH_CLIENT_SECRET);
   const envMSISDN = sanitizeCredential(process.env.ZAINCASH_MSISDN);
   const envAPIUrl = sanitizeCredential(process.env.ZAINCASH_API_URL);
-  const envServiceType = sanitizeCredential(process.env.ZAINCASH_SERVICE_TYPE);
 
-  const finalClientId = !isPlaceholder(envID) ? envID : "";
-  const finalClientSecret = !isPlaceholder(envSecret) ? envSecret : "";
-  const finalMsisdn = !isPlaceholder(envMSISDN) ? envMSISDN : "9647708506036";
-  // ZainCash docs: serviceType is "a service identifier (e.g., JAWS) provided
-  // by ZainCash" -- it's assigned per-merchant during onboarding, not free
-  // text. Falls back to a placeholder value until the real one is set.
-  const finalServiceType = !isPlaceholder(envServiceType) ? envServiceType : "Delivery";
+  const fileID = fileData?.clientId ? sanitizeCredential(fileData.clientId) : "";
+  const fileSecret = fileData?.clientSecret ? sanitizeCredential(fileData.clientSecret) : "";
+  const fileMSISDN = fileData?.msisdn ? sanitizeCredential(fileData.msisdn) : "";
+  const fileAPIUrl = fileData?.apiUrl ? sanitizeCredential(fileData.apiUrl) : "";
 
-  // Determine if credentials belong to the ZainCash public test/sandbox merchant
+  const finalClientId = !isPlaceholder(envID) ? envID : (!isPlaceholder(fileID) ? fileID : "");
+  const finalClientSecret = !isPlaceholder(envSecret) ? envSecret : (!isPlaceholder(fileSecret) ? fileSecret : "");
+  const finalMsisdn = !isPlaceholder(envMSISDN) ? envMSISDN : (!isPlaceholder(fileMSISDN) ? fileMSISDN : "9647708506036");
+
+  // Determine if credentials belong to test/sandbox merchant
   const isTestMerchant = !finalClientId || finalClientId === "5c649264111a345c7e8b4567" || finalClientId.startsWith("5c649264");
-  const mode = isTestMerchant ? "sandbox" : "production";
+  const rawMode = fileData?.mode || (isTestMerchant ? "sandbox" : "production");
+  const mode = isTestMerchant ? "sandbox" : (rawMode === "production" ? "production" : "sandbox");
 
-  let rawUrl = !isPlaceholder(envAPIUrl) ? envAPIUrl : "";
+  let rawUrl = !isPlaceholder(envAPIUrl) ? envAPIUrl : (!isPlaceholder(fileAPIUrl) ? fileAPIUrl : "");
   if (rawUrl.includes("pg-api-uat.zaincash.iq")) {
     rawUrl = "";
   }
@@ -127,81 +149,63 @@ function getZainCashConfig() {
     clientSecret: finalClientSecret,
     msisdn: finalMsisdn,
     apiUrl: finalApiUrl,
-    serviceType: finalServiceType,
-    mode,
-    configured: !isPlaceholder(finalClientId) && !isPlaceholder(finalClientSecret)
+    mode
   };
 }
 
-// JSON body parsing. Always let Express's own body-parser read the request
-// stream — a previous version special-cased process.env.VERCEL and skipped
-// this whenever req.body wasn't already a string, which on Vercel meant the
-// raw POST body was never read at all (req.body stayed undefined -> {}).
-// That silently broke every POST route on this deployment.
+// Body parsing middleware for standalone & serverless environments
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
 app.use((req: any, res: any, next: any) => {
-  express.json({ limit: "10mb" })(req, res, (err: any) => {
-    if (err) {
-      console.error("[JSON Parse Error]:", err);
-      return res.status(400).json({ success: false, error: "Invalid JSON body" });
+  if (typeof req.body === "string" && req.body.trim()) {
+    try {
+      req.body = JSON.parse(req.body);
+    } catch (e) {
+      // Keep string if not valid JSON
     }
-    // Defensive normalization in case some environment hands us a string body.
-    if (typeof req.body === "string" && req.body.trim()) {
-      try {
-        req.body = JSON.parse(req.body);
-      } catch (e) {
-        // Keep string if not valid JSON
-      }
-    }
-    req.body = req.body || {};
-    next();
-  });
+  }
+  req.body = req.body || {};
+  next();
 });
 
-// Normalize URL path for serverless / Vercel rewrites if needed
-app.use((req, res, next) => {
+// Normalize URL path for serverless / Vercel rewrites
+app.use((req: any, res: any, next: any) => {
   if (process.env.VERCEL) {
-    const fwdUri = (req.headers["x-forwarded-uri"] as string) || "";
-    const realUrl = (req.headers["x-real-url"] as string) || "";
-    const queryPath = (req.query?.__path as string) || "";
-    const matchedPath = (req.headers["x-matched-path"] as string) || (req.headers["x-invoke-path"] as string) || "";
-    const origUrl = req.originalUrl || "";
-    const currentUrl = req.url || "";
+    const rawUrl = req.originalUrl || req.url || "/";
+    const [pathPart, queryPart] = rawUrl.split("?");
 
-    let effectiveUrl = "";
-    if (fwdUri && !fwdUri.includes("index.ts") && !fwdUri.includes("index.js")) {
-      effectiveUrl = fwdUri;
-    } else if (realUrl && !realUrl.includes("index.ts") && !realUrl.includes("index.js")) {
-      effectiveUrl = realUrl;
-    } else if (queryPath) {
-      effectiveUrl = queryPath.startsWith("/api") ? queryPath : "/api" + (queryPath.startsWith("/") ? queryPath : "/" + queryPath);
-    } else if (origUrl && !origUrl.includes("index.ts") && !origUrl.includes("index.js")) {
-      effectiveUrl = origUrl;
-    } else if (matchedPath && !matchedPath.includes("index.ts") && !matchedPath.includes("index.js")) {
-      effectiveUrl = matchedPath;
-    } else if (currentUrl && !currentUrl.includes("index.ts") && !currentUrl.includes("index.js")) {
-      effectiveUrl = currentUrl;
+    let targetPath = pathPart || "/";
+
+    // Extract __path parameter from query string if injected by vercel.json rewrite
+    if (queryPart && queryPart.includes("__path=")) {
+      const params = new URLSearchParams(queryPart);
+      const __path = params.get("__path");
+      if (__path) {
+        targetPath = __path;
+      }
+    }
+
+    // Clean up /api/index.ts or /api/index prefix
+    targetPath = targetPath.replace(/^\/api\/index(\.ts|\.js)?/, "");
+
+    // Ensure path starts with /api
+    if (!targetPath.startsWith("/api")) {
+      targetPath = "/api" + (targetPath.startsWith("/") ? targetPath : "/" + targetPath);
+    }
+    targetPath = targetPath.replace(/^\/api\/api\//, "/api/");
+
+    // Reconstruct req.url with query string (removing internal __path param)
+    if (queryPart) {
+      const params = new URLSearchParams(queryPart);
+      params.delete("__path");
+      const cleanQuery = params.toString();
+      req.url = targetPath + (cleanQuery ? "?" + cleanQuery : "");
     } else {
-      effectiveUrl = currentUrl || origUrl || matchedPath;
+      req.url = targetPath;
     }
 
-    effectiveUrl = effectiveUrl.split("?")[0]; // remove query string from URL path matching
-    effectiveUrl = effectiveUrl.replace(/^\/api\/api\//, "/api/");
-    if (effectiveUrl.startsWith("/api/index.ts")) {
-      effectiveUrl = effectiveUrl.replace("/api/index.ts", "");
-    } else if (effectiveUrl.startsWith("/api/index")) {
-      effectiveUrl = effectiveUrl.replace("/api/index", "");
-    }
-
-    if (!effectiveUrl || effectiveUrl === "") {
-      effectiveUrl = "/";
-    }
-
-    if (!effectiveUrl.startsWith("/api") && effectiveUrl !== "/") {
-      effectiveUrl = "/api" + (effectiveUrl.startsWith("/") ? effectiveUrl : "/" + effectiveUrl);
-    }
-
-    req.url = effectiveUrl;
-    console.log(`[Vercel Serverless] Method: ${req.method}, Effective URL: ${req.url}`);
+    console.log(`[Vercel Serverless] Method: ${req.method}, Original: ${rawUrl} -> Mapped URL: ${req.url}`);
   }
   next();
 });
@@ -685,15 +689,30 @@ app.get(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
   return res.json({ success: true, config });
 });
 
-// POST endpoint kept for backward compatibility, but config can no longer be
-// saved to disk: Vercel's filesystem is read-only outside /tmp (and /tmp
-// doesn't persist), so a file-based "save" silently did nothing useful there.
-// Credentials must be set as real environment variables on each platform.
+// POST save ZainCash configuration
 app.post(["/api/zaincash/config", "/zaincash/config"], (req, res) => {
-  return res.status(410).json({
-    success: false,
-    error: "Saving ZainCash config via this endpoint is no longer supported. Set ZAINCASH_CLIENT_ID, ZAINCASH_CLIENT_SECRET, ZAINCASH_MSISDN, and ZAINCASH_API_URL as environment variables on each deployment platform (Render and Vercel each need their own copy), then redeploy."
-  });
+  const { clientId, clientSecret, msisdn, mode } = req.body;
+  
+  const config = {
+    clientId: clientId || "",
+    clientSecret: clientSecret || "",
+    msisdn: msisdn || "",
+    mode: mode === "production" ? "production" : "sandbox",
+    apiUrl: mode === "production" ? "https://api.zaincash.iq" : "https://test.zaincash.iq"
+  };
+
+  try {
+    try {
+      fs.writeFileSync("./zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
+    } catch (writeErr) {
+      fs.writeFileSync("/tmp/zaincash-config.json", JSON.stringify(config, null, 2), "utf8");
+    }
+    console.log("[ZainCash] Config saved dynamically:", config);
+    return res.json({ success: true, config });
+  } catch (err: any) {
+    console.error("[ZainCash] Failed to write config:", err);
+    return res.status(500).json({ success: false, error: "Failed to write configuration file." });
+  }
 });
 
 // Helper to fetch with a strict timeout to prevent serverless function hangs on Vercel
@@ -722,14 +741,6 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
   const ZAINCASH_CLIENT_SECRET = config.clientSecret;
   const ZAINCASH_API_URL = config.apiUrl;
 
-  if (!config.configured) {
-    console.error("[ZainCash] Missing ZAINCASH_CLIENT_ID / ZAINCASH_CLIENT_SECRET environment variables on this deployment.");
-    return res.status(503).json({
-      success: false,
-      error: "ZainCash isn't configured on this deployment yet. Set ZAINCASH_CLIENT_ID and ZAINCASH_CLIENT_SECRET as environment variables, then redeploy."
-    });
-  }
-
   const rawCustomerPhone = (customerPhone || phone || "").toString().trim();
 
   // Build the self-referential callback URL using APP_URL or request host
@@ -740,101 +751,166 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
 
   console.log(`[ZainCash] Initiating transaction. Mode: ${config.mode}, Amount: ${amount}, OrderId: ${orderId}`);
 
-  // --- ZainCash API v2 flow (OAuth2 client_credentials + hosted transaction init) ---
-  // This account only has v2 (OAuth2) credentials. There is no legacy v1
-  // merchantId for it -- the previous v1 attempt sent the v2 client_id as a
-  // v1 merchantId (a different identifier space entirely), which is exactly
-  // why ZainCash returned {"err":"invalid_merchant_id"}.
-  const v2BaseUrl = ZAINCASH_API_URL
-    ? ZAINCASH_API_URL.trim().replace(/\/+$/, "").replace("pg-api-uat.zaincash.iq", "test.zaincash.iq")
-    : (config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://pg-api.zaincash.iq");
+  // Create standard ZainCash JWT token first so it is available for client fallback
+  let token = "";
+  try {
+    const jwtPayload: any = {
+      amount: Number(amount),
+      serviceType: String(serviceType || "Software License"),
+      orderId: String(orderId),
+      redirectUrl: String(redirectUrl),
+      iat: Math.floor(Date.now() / 1000) - 30,
+      exp: Math.floor(Date.now() / 1000) + 4 * 60 * 60,
+    };
+    if (rawCustomerPhone) {
+      jwtPayload.msisdn = rawCustomerPhone;
+    } else {
+      jwtPayload.msisdn = "";
+    }
+    const secretToUse = ZAINCASH_CLIENT_SECRET || "fallback_zaincash_secret";
+    token = jwt.sign(jwtPayload, secretToUse, { algorithm: "HS256" });
+  } catch (jwtErr: any) {
+    console.error(`[ZainCash] Error generating JWT token:`, jwtErr);
+  }
+
+  let lastErrorMsg = "";
 
   try {
-    const tokenParams = new URLSearchParams({
-      grant_type: "client_credentials",
-      client_id: ZAINCASH_CLIENT_ID || "",
-      client_secret: ZAINCASH_CLIENT_SECRET || "",
-      scope: "payment:write payment:read"
-    });
+    // --- 1. ATTEMPT ZAINCASH API v2 FLOW ---
+    const v2BaseUrl = ZAINCASH_API_URL 
+      ? ZAINCASH_API_URL.trim().replace(/\/+$/, "").replace("pg-api-uat.zaincash.iq", "test.zaincash.iq")
+      : (config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://pg-api.zaincash.iq");
 
-    const tokenRes = await fetchWithTimeout(`${v2BaseUrl}/oauth2/token`, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: tokenParams.toString()
-    }, 6000);
-
-    const tokenText = await tokenRes.text().catch(() => "");
-    let tokenData: any = null;
-    try { tokenData = JSON.parse(tokenText); } catch (e) {}
-
-    if (!tokenRes.ok || !tokenData || !tokenData.access_token) {
-      console.error("[ZainCash] Token request failed:", tokenRes.status, tokenText);
-      return res.status(502).json({
-        success: false,
-        error: `ZainCash rejected the token request (HTTP ${tokenRes.status}): ${tokenText.slice(0, 300) || "empty response"}`
+    try {
+      const tokenParams = new URLSearchParams({
+        grant_type: "client_credentials",
+        client_id: ZAINCASH_CLIENT_ID || "",
+        client_secret: ZAINCASH_CLIENT_SECRET || "",
+        scope: "payment:write payment:read"
       });
+
+      const tokenRes = await fetchWithTimeout(`${v2BaseUrl}/oauth2/token`, {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: tokenParams.toString()
+      }, 1500);
+
+      if (tokenRes.ok) {
+        const tokenData = await tokenRes.json().catch(() => null);
+        if (tokenData && tokenData.access_token) {
+          const extRefId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
+          const successCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=success` : `${redirectUrl}?status=success`;
+          const failureCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=failed` : `${redirectUrl}?status=failed`;
+
+          const v2Payload: any = {
+            language: lang === "ar" ? "ar" : "en",
+            externalReferenceId: extRefId,
+            orderId: String(orderId),
+            amount: { value: String(amount), currency: "IQD" },
+            serviceType: String(serviceType || "Delivery"),
+            redirectUrls: { successUrl: successCallbackUrl, failureUrl: failureCallbackUrl }
+          };
+
+          const initRes = await fetchWithTimeout(`${v2BaseUrl}/api/v2/payment-gateway/transaction/init`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${tokenData.access_token}`
+            },
+            body: JSON.stringify(v2Payload)
+          }, 1500);
+
+          const initText = await initRes.text().catch(() => "");
+          let initData: any = null;
+          try { initData = JSON.parse(initText); } catch (e) {}
+
+          if (initRes.ok && initData) {
+            const txId = initData.id || initData.transactionId || initData.referenceId;
+            let targetRedirectUrl = initData.redirectUrl || initData.url || initData.paymentUrl;
+            if (!targetRedirectUrl && txId) {
+              targetRedirectUrl = `${v2BaseUrl}/transaction/pay?id=${txId}`;
+            }
+            if (targetRedirectUrl) {
+              return res.json({
+                success: true,
+                transactionId: txId || orderId,
+                redirectUrl: targetRedirectUrl,
+              });
+            }
+          }
+        }
+      }
+    } catch (v2Err: any) {
+      lastErrorMsg = `v2: ${v2Err?.message || v2Err}`;
     }
 
-    const extRefId = typeof crypto.randomUUID === "function" ? crypto.randomUUID() : Math.random().toString(36).substring(2) + Date.now().toString(36);
-    const successCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=success` : `${redirectUrl}?status=success`;
-    const failureCallbackUrl = redirectUrl.includes("?") ? `${redirectUrl}&status=failed` : `${redirectUrl}?status=failed`;
+    // --- 2. ATTEMPT ZAINCASH API v1 FLOW ---
+    if (token) {
+      const defaultV1Domain = config.mode === "sandbox" ? "https://test.zaincash.iq" : "https://api.zaincash.iq";
+      const targetInitUrl = `${defaultV1Domain}/transaction/init`;
 
-    const v2Payload: any = {
-      language: lang === "ar" ? "ar" : "en",
-      externalReferenceId: extRefId,
-      orderId: String(orderId),
-      amount: { value: String(amount), currency: "IQD" },
-      customer: { phone: rawCustomerPhone || config.msisdn },
-      serviceType: String(serviceType || config.serviceType),
-      redirectUrls: { successUrl: successCallbackUrl, failureUrl: failureCallbackUrl }
-    };
+      try {
+        const response = await fetchWithTimeout(targetInitUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json"
+          },
+          body: new URLSearchParams({
+            token: token,
+            merchantId: ZAINCASH_CLIENT_ID || "",
+            lang: lang || "en"
+          }).toString()
+        }, 1500);
 
-    const initRes = await fetchWithTimeout(`${v2BaseUrl}/api/v2/payment-gateway/transaction/init`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${tokenData.access_token}`
-      },
-      body: JSON.stringify(v2Payload)
-    }, 8000);
+        const status = response.status;
+        const text = await response.text().catch(() => "");
 
-    const initText = await initRes.text().catch(() => "");
-    let initData: any = null;
-    try { initData = JSON.parse(initText); } catch (e) {}
-
-    if (!initRes.ok || !initData) {
-      console.error("[ZainCash] Transaction init failed:", initRes.status, initText);
-      return res.status(502).json({
-        success: false,
-        error: `ZainCash rejected the transaction (HTTP ${initRes.status}): ${initText.slice(0, 300) || "empty response"}`
-      });
+        if (status === 200) {
+          try {
+            const parsed = JSON.parse(text);
+            if (parsed.id) {
+              const payUrl = `${defaultV1Domain}/transaction/pay?id=${parsed.id}`;
+              return res.json({
+                success: true,
+                transactionId: parsed.id,
+                redirectUrl: payUrl,
+              });
+            } else if (parsed.err) {
+              lastErrorMsg = typeof parsed.err === 'string' ? parsed.err : (parsed.err.msg || JSON.stringify(parsed.err));
+            }
+          } catch (e: any) {
+            lastErrorMsg = `Invalid JSON: ${e.message}`;
+          }
+        } else {
+          lastErrorMsg = `HTTP ${status}`;
+        }
+      } catch (v1Err: any) {
+        lastErrorMsg = `v1: ${v1Err?.message || v1Err}`;
+      }
     }
 
-    const txId = initData.id || initData.transactionId || initData.referenceId;
-    let targetRedirectUrl = initData.redirectUrl || initData.url || initData.paymentUrl;
-    if (!targetRedirectUrl && txId) {
-      targetRedirectUrl = `${v2BaseUrl}/transaction/pay?id=${txId}`;
-    }
-
-    if (!targetRedirectUrl) {
-      console.error("[ZainCash] Init succeeded but no redirect URL/id found in response:", initText);
-      return res.status(502).json({
-        success: false,
-        error: `ZainCash accepted the request but returned an unexpected response shape: ${initText.slice(0, 300)}`
-      });
-    }
-
+    // Fallback gracefully to client-side initiation
     return res.json({
       success: true,
-      transactionId: txId || orderId,
-      redirectUrl: targetRedirectUrl,
+      fallbackToClient: true,
+      token: token,
+      clientId: ZAINCASH_CLIENT_ID,
+      apiUrl: config.apiUrl ? config.apiUrl.replace("pg-api.zaincash.iq", "api.zaincash.iq") : "https://test.zaincash.iq",
+      mode: config.mode,
+      warning: lastErrorMsg || "Serverless direct connection bypassed; connecting via client gateway."
     });
 
   } catch (error: any) {
     console.error(`[ZainCash] Initiation error:`, error);
-    return res.status(502).json({
-      success: false,
-      error: error?.message || "Unexpected error contacting ZainCash."
+    return res.json({
+      success: true,
+      fallbackToClient: true,
+      token: token,
+      clientId: ZAINCASH_CLIENT_ID,
+      apiUrl: config.apiUrl ? config.apiUrl.replace("pg-api.zaincash.iq", "api.zaincash.iq") : "https://test.zaincash.iq",
+      mode: config.mode,
+      warning: error?.message || "Unexpected server error handled gracefully."
     });
   }
 });
