@@ -127,9 +127,18 @@ function getZainCashConfig() {
   };
 }
 
-// Safe body parsing middleware for standalone & serverless environments
+// JSON body parsing. Always let Express's own body-parser read the request
+// stream — a previous version special-cased process.env.VERCEL and skipped
+// this whenever req.body wasn't already a string, which on Vercel meant the
+// raw POST body was never read at all (req.body stayed undefined -> {}).
+// That silently broke every POST route on this deployment.
 app.use((req: any, res: any, next: any) => {
-  if (process.env.VERCEL || req.body !== undefined) {
+  express.json({ limit: "10mb" })(req, res, (err: any) => {
+    if (err) {
+      console.error("[JSON Parse Error]:", err);
+      return res.status(400).json({ success: false, error: "Invalid JSON body" });
+    }
+    // Defensive normalization in case some environment hands us a string body.
     if (typeof req.body === "string" && req.body.trim()) {
       try {
         req.body = JSON.parse(req.body);
@@ -138,14 +147,6 @@ app.use((req: any, res: any, next: any) => {
       }
     }
     req.body = req.body || {};
-    return next();
-  }
-
-  express.json({ limit: "10mb" })(req, res, (err: any) => {
-    if (err) {
-      console.error("[JSON Parse Error]:", err);
-      return res.status(400).json({ success: false, error: "Invalid JSON body" });
-    }
     next();
   });
 });
