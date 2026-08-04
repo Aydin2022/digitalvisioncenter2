@@ -776,7 +776,7 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
         body: tokenParams.toString()
-      }, 1500);
+      }, 6000);
 
       if (tokenRes.ok) {
         const tokenData = await tokenRes.json().catch(() => null);
@@ -802,7 +802,7 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
               "Authorization": `Bearer ${tokenData.access_token}`
             },
             body: JSON.stringify(v2Payload)
-          }, 1500);
+          }, 8000);
 
           const initText = await initRes.text().catch(() => "");
           let initData: any = null;
@@ -845,7 +845,7 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
             merchantId: ZAINCASH_CLIENT_ID || "",
             lang: lang || "en"
           }).toString()
-        }, 1500);
+        }, 5000);
 
         const status = response.status;
         const text = await response.text().catch(() => "");

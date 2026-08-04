@@ -128,110 +128,63 @@ export default function CartView({
 
         if (response.ok && data && data.success) {
           if (data.fallbackToClient) {
-            addLog(`Connecting directly to ZainCash payment portal...`, 'info');
-            const isTest = data.mode === 'sandbox' || !data.clientId || data.clientId === '5c649264111a345c7e8b4567' || data.clientId.startsWith('5c649264');
-            const targetBase = data.apiUrl 
-              ? data.apiUrl.replace(/\/+$/, '') 
-              : (isTest ? 'https://pg-api-uat.zaincash.iq' : 'https://api.zaincash.iq');
+            // A fetch() POST directly to ZainCash's API from the browser will
+            // always be blocked by CORS -- payment gateways don't allow
+            // arbitrary origins to initiate transactions via AJAX, and that's
+            // correct/expected behavior on their end, not something we can
+            // configure around from here. A real <form> submit is a full page
+            // navigation, not an AJAX call, so CORS doesn't apply to it --
+            // go straight to that instead of attempting doomed fetch() calls.
+            addLog(`Connecting to ZainCash payment portal...`, 'info');
+            const targetBase = data.apiUrl
+              ? data.apiUrl.replace(/\/+$/, '')
+              : 'https://api.zaincash.iq';
 
-            let transactionId = '';
-            let payBaseUrl = targetBase;
-            let initErrorMsg = '';
-
-            // Attempt 1: Fetch transaction ID directly from client
             try {
-              const res = await fetch(`${targetBase}/transaction/init`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: new URLSearchParams({ token: data.token, merchantId: data.clientId, lang: lang || 'en' }).toString()
-              });
-              const parsed = await res.json().catch(() => null);
-              if (parsed && parsed.id) {
-                transactionId = parsed.id;
-              } else if (parsed && parsed.err) {
-                initErrorMsg = typeof parsed.err === 'string' ? parsed.err : parsed.err.msg || JSON.stringify(parsed.err);
-              }
-            } catch (e) {}
+              addLog(`Submitting checkout form to ZainCash portal in new tab...`, 'info');
+              const form = document.createElement('form');
+              form.method = 'POST';
+              form.action = `${targetBase}/transaction/init`;
+              form.target = '_blank';
 
-            // Attempt 2: If primary failed, try sandbox endpoint
-            if (!transactionId && targetBase !== 'https://test.zaincash.iq') {
-              try {
-                const res = await fetch(`https://test.zaincash.iq/transaction/init`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                  body: new URLSearchParams({ token: data.token, merchantId: data.clientId, lang: lang || 'en' }).toString()
-                });
-                const parsed = await res.json().catch(() => null);
-                if (parsed && parsed.id) {
-                  transactionId = parsed.id;
-                  payBaseUrl = 'https://test.zaincash.iq';
-                }
-              } catch (e) {}
-            }
+              const tokenInput = document.createElement('input');
+              tokenInput.type = 'hidden';
+              tokenInput.name = 'token';
+              tokenInput.value = data.token;
+              form.appendChild(tokenInput);
 
-            // If transaction ID was retrieved
-            if (transactionId) {
-              const payUrl = `${payBaseUrl}/transaction/pay?id=${transactionId}`;
-              addLog(`ZainCash transaction created! Redirecting to payment portal...`, 'success');
-              const win = window.open(payUrl, '_blank');
-              if (!win) {
-                window.location.href = payUrl;
-              }
-            } else {
-              // Direct browser POST form submission to ZainCash portal in new tab
-              try {
-                addLog(`Submitting checkout form to ZainCash portal in new tab...`, 'info');
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = `${targetBase}/transaction/init`;
-                form.target = '_blank';
+              const merchantInput = document.createElement('input');
+              merchantInput.type = 'hidden';
+              merchantInput.name = 'merchantId';
+              merchantInput.value = data.clientId;
+              form.appendChild(merchantInput);
 
-                const tokenInput = document.createElement('input');
-                tokenInput.type = 'hidden';
-                tokenInput.name = 'token';
-                tokenInput.value = data.token;
-                form.appendChild(tokenInput);
+              const langInput = document.createElement('input');
+              langInput.type = 'hidden';
+              langInput.name = 'lang';
+              langInput.value = lang || 'en';
+              form.appendChild(langInput);
 
-                const merchantInput = document.createElement('input');
-                merchantInput.type = 'hidden';
-                merchantInput.name = 'merchantId';
-                merchantInput.value = data.clientId;
-                form.appendChild(merchantInput);
+              document.body.appendChild(form);
+              form.submit();
 
-                const langInput = document.createElement('input');
-                langInput.type = 'hidden';
-                langInput.name = 'lang';
-                langInput.value = lang || 'en';
-                form.appendChild(langInput);
+              setTimeout(() => {
+                try {
+                  if (document.body.contains(form)) {
+                    document.body.removeChild(form);
+                  }
+                } catch (e) {}
+              }, 1000);
 
-                document.body.appendChild(form);
-                form.submit();
-
-                setTimeout(() => {
-                  try {
-                    if (document.body.contains(form)) {
-                      document.body.removeChild(form);
-                    }
-                  } catch (e) {}
-                }, 1000);
-
-                if (initErrorMsg && (initErrorMsg.includes('invalid_merchant') || initErrorMsg.includes('merchant_not_found') || initErrorMsg.includes('معرف التاجر'))) {
-                  const notice = lang === 'ar'
-                    ? `ملاحظة: معرّف التاجر (${data.clientId}) غير مفعّل لحساب الإنتاج لدى زين كاش. يرجى إدخال معرّف التاجر المفعّل في لوحة تحكم المسؤول (Admin).`
-                    : `Notice: ZainCash rejected Merchant ID (${data.clientId}). Please update your active Merchant ID in Admin Settings.`;
-                  setZaincashError(notice);
-                }
-
-                addLog(`Redirected to ZainCash payment portal in new tab.`, 'success');
-              } catch (formErr: any) {
-                console.error("Client checkout failed:", formErr);
-                setIsOrdering(false);
-                setZaincashError(lang === 'ar' 
-                  ? 'فشل الاتصال ببوابة زين كاش.'
-                  : 'Could not connect to ZainCash payment portal.');
-                addLog(`Gateway connection error: ${formErr?.message}`, 'error');
-                db.updateOrderStatus(newOrder.id, 'cancelled');
-              }
+              addLog(`Redirected to ZainCash payment portal in new tab.`, 'success');
+            } catch (formErr: any) {
+              console.error("Client checkout failed:", formErr);
+              setIsOrdering(false);
+              setZaincashError(lang === 'ar' 
+                ? 'فشل الاتصال ببوابة زين كاش.'
+                : 'Could not connect to ZainCash payment portal.');
+              addLog(`Gateway connection error: ${formErr?.message}`, 'error');
+              db.updateOrderStatus(newOrder.id, 'cancelled');
             }
           } else if (data.redirectUrl) {
             addLog(`ZainCash checkout initialized successfully. Redirecting in new tab...`, 'success');
