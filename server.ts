@@ -101,10 +101,15 @@ function getZainCashConfig() {
   const envSecret = sanitizeCredential(process.env.ZAINCASH_CLIENT_SECRET);
   const envMSISDN = sanitizeCredential(process.env.ZAINCASH_MSISDN);
   const envAPIUrl = sanitizeCredential(process.env.ZAINCASH_API_URL);
+  const envServiceType = sanitizeCredential(process.env.ZAINCASH_SERVICE_TYPE);
 
   const finalClientId = !isPlaceholder(envID) ? envID : "";
   const finalClientSecret = !isPlaceholder(envSecret) ? envSecret : "";
   const finalMsisdn = !isPlaceholder(envMSISDN) ? envMSISDN : "9647708506036";
+  // ZainCash docs: serviceType is "a service identifier (e.g., JAWS) provided
+  // by ZainCash" -- it's assigned per-merchant during onboarding, not free
+  // text. Falls back to a placeholder value until the real one is set.
+  const finalServiceType = !isPlaceholder(envServiceType) ? envServiceType : "Delivery";
 
   // Determine if credentials belong to the ZainCash public test/sandbox merchant
   const isTestMerchant = !finalClientId || finalClientId === "5c649264111a345c7e8b4567" || finalClientId.startsWith("5c649264");
@@ -122,6 +127,7 @@ function getZainCashConfig() {
     clientSecret: finalClientSecret,
     msisdn: finalMsisdn,
     apiUrl: finalApiUrl,
+    serviceType: finalServiceType,
     mode,
     configured: !isPlaceholder(finalClientId) && !isPlaceholder(finalClientSecret)
   };
@@ -779,7 +785,7 @@ app.post(["/api/zaincash/initiate", "/zaincash/initiate"], async (req, res) => {
       orderId: String(orderId),
       amount: { value: String(amount), currency: "IQD" },
       customer: { phone: rawCustomerPhone || config.msisdn },
-      serviceType: String(serviceType || "Delivery"),
+      serviceType: String(serviceType || config.serviceType),
       redirectUrls: { successUrl: successCallbackUrl, failureUrl: failureCallbackUrl }
     };
 
