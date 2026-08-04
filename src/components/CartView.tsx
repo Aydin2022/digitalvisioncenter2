@@ -127,66 +127,7 @@ export default function CartView({
         }
 
         if (response.ok && data && data.success) {
-          if (data.fallbackToClient) {
-            // A fetch() POST directly to ZainCash's API from the browser will
-            // always be blocked by CORS -- payment gateways don't allow
-            // arbitrary origins to initiate transactions via AJAX, and that's
-            // correct/expected behavior on their end, not something we can
-            // configure around from here. A real <form> submit is a full page
-            // navigation, not an AJAX call, so CORS doesn't apply to it --
-            // go straight to that instead of attempting doomed fetch() calls.
-            addLog(`Connecting to ZainCash payment portal...`, 'info');
-            const targetBase = data.apiUrl
-              ? data.apiUrl.replace(/\/+$/, '')
-              : 'https://api.zaincash.iq';
-
-            try {
-              addLog(`Submitting checkout form to ZainCash portal in new tab...`, 'info');
-              const form = document.createElement('form');
-              form.method = 'POST';
-              form.action = `${targetBase}/transaction/init`;
-              form.target = '_blank';
-
-              const tokenInput = document.createElement('input');
-              tokenInput.type = 'hidden';
-              tokenInput.name = 'token';
-              tokenInput.value = data.token;
-              form.appendChild(tokenInput);
-
-              const merchantInput = document.createElement('input');
-              merchantInput.type = 'hidden';
-              merchantInput.name = 'merchantId';
-              merchantInput.value = data.clientId;
-              form.appendChild(merchantInput);
-
-              const langInput = document.createElement('input');
-              langInput.type = 'hidden';
-              langInput.name = 'lang';
-              langInput.value = lang || 'en';
-              form.appendChild(langInput);
-
-              document.body.appendChild(form);
-              form.submit();
-
-              setTimeout(() => {
-                try {
-                  if (document.body.contains(form)) {
-                    document.body.removeChild(form);
-                  }
-                } catch (e) {}
-              }, 1000);
-
-              addLog(`Redirected to ZainCash payment portal in new tab.`, 'success');
-            } catch (formErr: any) {
-              console.error("Client checkout failed:", formErr);
-              setIsOrdering(false);
-              setZaincashError(lang === 'ar' 
-                ? 'فشل الاتصال ببوابة زين كاش.'
-                : 'Could not connect to ZainCash payment portal.');
-              addLog(`Gateway connection error: ${formErr?.message}`, 'error');
-              db.updateOrderStatus(newOrder.id, 'cancelled');
-            }
-          } else if (data.redirectUrl) {
+          if (data.redirectUrl) {
             addLog(`ZainCash checkout initialized successfully. Redirecting in new tab...`, 'success');
             const paymentWindow = window.open(data.redirectUrl, '_blank');
             if (!paymentWindow) {
@@ -204,7 +145,7 @@ export default function CartView({
           } else {
             setIsOrdering(false);
             setZaincashError('Failed to initialize ZainCash gateway transaction.');
-            addLog(`ZainCash gateway error: No redirect URL or token provided.`, 'error');
+            addLog(`ZainCash gateway error: No redirect URL provided.`, 'error');
             db.updateOrderStatus(newOrder.id, 'cancelled');
           }
         } else {
